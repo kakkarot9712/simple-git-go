@@ -3,13 +3,23 @@ package main
 import (
 	"bytes"
 	"compress/zlib"
+	"crypto/sha1"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"strconv"
 	"strings"
+
 	// Uncomment this block to pass the first stage!
 	"os"
 )
+
+func exitIfError(err error, msg string) {
+	if err != nil {
+		fmt.Printf("Error: %v failed: %v", msg, err)
+		os.Exit(1)
+	}
+}
 
 // Usage: your_program.sh <command> <arg1> <arg2> ...
 func main() {
@@ -77,6 +87,33 @@ func main() {
 		}
 		data := p[zeroIndex+1:]
 		os.Stdout.Write(data[:contentLength])
+
+	case "hash-object":
+		fileName := os.Args[3]
+		buff, err := os.ReadFile(fileName)
+		exitIfError(err, "File Read")
+		blob := []byte("blob ")
+		blob = append(blob, []byte(strconv.Itoa(len(buff)))...)
+		blob = append(blob, byte(0))
+		blob = append(blob, buff...)
+		sha := sha1.New()
+		_, err = sha.Write(blob)
+		exitIfError(err, "HASH Write")
+		hash := sha.Sum(nil)
+		hexhash := hex.EncodeToString(hash)
+		exitIfError(err, "HEX DECODE")
+		var in bytes.Buffer
+		newFilePath := ".git/objects/" + hexhash[:2] + "/" + hexhash[2:]
+
+		zlibWriter := zlib.NewWriter(&in)
+		_, err = zlibWriter.Write(blob)
+		zlibWriter.Close()
+		exitIfError(err, "ZLIB Write")
+		err = os.Mkdir(".git/objects/"+hexhash[:2], 0644)
+		exitIfError(err, "DIR CREATE")
+		err = os.WriteFile(newFilePath, in.Bytes(), 0755)
+		exitIfError(err, "FILE WRITE")
+		os.Stdout.Write([]byte(hexhash))
 
 	default:
 		fmt.Fprintf(os.Stderr, "Unknown command %s\n", command)
