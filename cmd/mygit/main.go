@@ -1,7 +1,12 @@
 package main
 
 import (
+	"bytes"
+	"compress/zlib"
 	"fmt"
+	"io"
+	"strconv"
+	"strings"
 	// Uncomment this block to pass the first stage!
 	"os"
 )
@@ -32,6 +37,46 @@ func main() {
 		}
 
 		fmt.Println("Initialized git directory")
+
+	case "cat-file":
+		sha := os.Args[3]
+		objectPath := ".git" + "/objects/" + sha[:2] + "/" + sha[2:]
+		buff, err := os.ReadFile(objectPath)
+		reader := bytes.NewReader(buff)
+		if err != nil {
+			fmt.Println("Error: Read failed", err)
+			os.Exit(1)
+		}
+		r, err := zlib.NewReader(reader)
+		defer r.Close()
+		if err != nil {
+			fmt.Println("Error: Decomp failed", err)
+			os.Exit(1)
+		}
+		p, err := io.ReadAll(r)
+		if err != nil {
+			fmt.Println("Error: Zlib-Read failed", err)
+			os.Exit(1)
+		}
+		splits := strings.Split(string(p), " ")
+		if splits[0] != "blob" {
+			fmt.Println("Error: Not a Blob")
+			os.Exit(1)
+		}
+		zeroIndex := -1
+		for i, b := range p {
+			if b == 0 {
+				zeroIndex = i
+				break
+			}
+		}
+		contentLength, err := strconv.Atoi(string(p[5:zeroIndex]))
+		if err != nil {
+			fmt.Println("Error: Invalid Length Info")
+			os.Exit(1)
+		}
+		data := p[zeroIndex+1:]
+		os.Stdout.Write(data[:contentLength])
 
 	default:
 		fmt.Fprintf(os.Stderr, "Unknown command %s\n", command)
