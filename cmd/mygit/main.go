@@ -1,133 +1,26 @@
 package main
 
 import (
-	"bytes"
-	"crypto/sha1"
 	"encoding/hex"
 	"fmt"
-	"io"
 	"log"
+	"math"
 	"path"
 	"strconv"
 	"strings"
 
 	// Uncomment this block to pass the first stage!
-	"compress/zlib"
+
 	"os"
 	// ""
 )
 
-func exitIfError(err error, msg string) {
-	if err != nil {
-		fmt.Printf("Error: %v failed: %v", msg, err)
-		os.Exit(1)
-	}
-}
-
-type tree struct {
-	perm string
-	name string
-	sha  [20]byte
-}
-
-func hashContent(content []byte) []byte {
-	sha := sha1.New()
-	_, err := sha.Write(content)
-	exitIfError(err, "HASH_WRITE")
-	hash := sha.Sum(nil)
-	return hash
-}
-
-func compressContent(content []byte) []byte {
-	var in bytes.Buffer
-	w := zlib.NewWriter(&in)
-	_, err := w.Write(content)
-	w.Close()
-	exitIfError(err, "ZLIB_COMP")
-	return in.Bytes()
-}
-
-func decompressContent(content []byte) []byte {
-	var out bytes.Buffer
-	r, err := zlib.NewReader(&out)
-	exitIfError(err, "ZLIB_DECOMP_INIT")
-	_, err = r.Read(content)
-	r.Close()
-	exitIfError(err, "ZLIB_DECOMP_READ")
-	return out.Bytes()
-}
-
-func writeFileObject(filename string) (hash []byte) {
-	buff, err := os.ReadFile("./" + filename)
-	exitIfError(err, "File Read")
-	blob := []byte("blob ")
-	blob = append(blob, []byte(strconv.Itoa(len(buff)))...)
-	blob = append(blob, byte(0))
-	blob = append(blob, buff...)
-	sha := sha1.New()
-	_, err = sha.Write(blob)
-	exitIfError(err, "HASH Write")
-	hash = sha.Sum(nil)
-	hexhash := hex.EncodeToString(hash)
-	exitIfError(err, "HEX DECODE")
-	var in bytes.Buffer
-	newFilePath := ".git/objects/" + hexhash[:2] + "/" + hexhash[2:]
-	zlibWriter := zlib.NewWriter(&in)
-	_, err = zlibWriter.Write(blob)
-	zlibWriter.Close()
-	exitIfError(err, "ZLIB Write")
-	err = os.Mkdir(".git/objects/"+hexhash[:2], 0644)
-	if err != nil && !os.IsExist(err) {
-		log.Fatal("DIR_CREATE_FAILED")
-	}
-	err = os.WriteFile(newFilePath, in.Bytes(), 0755)
-	exitIfError(err, "FILE WRITE")
-	return
-}
-
-func writeTreeObject(dirpath string, permMap *map[string]uint32) (hash []byte) {
-	files, err := os.ReadDir(dirpath)
-	exitIfError(err, "READ_DIR")
-	// fmt.Println(files)
-	content := ""
-	zeroByte := byte(0)
-	for _, file := range files {
-		if file.Name() != ".git" {
-			if file.IsDir() {
-				// fmt.Println(path.Join(dirpath, file.Name()) + "_DIR")
-				hash := writeTreeObject(path.Join(dirpath, file.Name()), permMap)
-				content += strconv.Itoa(int((*permMap)["dir"])) + " " + file.Name() + string(zeroByte) + string(hash)
-				// Calc Hash Rec
-			} else {
-				// fmt.Println(file.Name() + "_FILE")
-				hash := writeFileObject(path.Join(dirpath, file.Name()))
-				content += strconv.Itoa(int((*permMap)["file"])) + " " + file.Name() + string(zeroByte) + string(hash)
-				// fmt.Println(content, "C")
-			}
-		}
-	}
-	treeContent := "tree " + strconv.Itoa(len(content)) + string(zeroByte) + content
-	hash = hashContent([]byte(treeContent))
-	hexHash := hex.EncodeToString(hash)
-	compressedContent := compressContent([]byte(treeContent))
-	fileObjPath := ".git" + "/objects/" + hexHash[:2] + "/" + hexHash[2:]
-	err = os.Mkdir(".git/objects/"+hexHash[:2], 0644)
-	if err != nil && os.IsExist(err) {
-		log.Fatal("DIR_CREATE_FAILED")
-	}
-	err = os.WriteFile(fileObjPath, compressedContent, 0755)
-	if err != nil {
-		log.Fatal("FILE_WRITE_FAILED")
-	}
-	return
-}
-
 // Usage: your_program.sh <command> <arg1> <arg2> ...
 func main() {
 	permMap := map[string]uint32{"file": 100644, "exe": 100755, "symlink": 120000, "dir": 40000}
-	const GIT_HOME = ".git"
-	// CWD, err := os.Getwd()
-	// exitIfError(err, "CWD")
+	BYTE_VAL := 128
+	CWD, err := os.Getwd()
+	exitIfError(err, "CWD")
 	// You can use print statements as follows for debugging, they'll be visible when running tests.
 	// fmt.Println("Logs from your program will appear here!")
 
@@ -157,47 +50,16 @@ func main() {
 		sha := os.Args[3]
 		objectPath := ".git" + "/objects/" + sha[:2] + "/" + sha[2:]
 		buff, err := os.ReadFile(objectPath)
-		reader := bytes.NewReader(buff)
-		if err != nil {
-			fmt.Println("Error: Read failed", err)
-			os.Exit(1)
-		}
-		r, err := zlib.NewReader(reader)
-		defer r.Close()
-		if err != nil {
-			fmt.Println("Error: Decomp failed", err)
-			os.Exit(1)
-		}
-		p, err := io.ReadAll(r)
-		if err != nil {
-			fmt.Println("Error: Zlib-Read failed", err)
-			os.Exit(1)
-		}
-		splits := strings.Split(string(p), " ")
-		if splits[0] != "blob" {
-			fmt.Println("Error: Not a Blob")
-			os.Exit(1)
-		}
-		zeroIndex := -1
-		for i, b := range p {
-			if b == 0 {
-				zeroIndex = i
-				break
-			}
-		}
-		contentLength, err := strconv.Atoi(string(p[5:zeroIndex]))
-		if err != nil {
-			fmt.Println("Error: Invalid Length Info")
-			os.Exit(1)
-		}
-		data := p[zeroIndex+1:]
-		os.Stdout.Write(data[:contentLength])
+		exitIfError(err, "FILE_READ_CAT")
+		data := decodeBlobObject(buff)
+		os.Stdout.Write(data)
 
 	case "hash-object":
 		fileName := os.Args[3]
-		hash := writeFileObject(fileName)
-		hexhash := hex.EncodeToString(hash)
-		os.Stdout.Write([]byte(hexhash))
+		buff, err := os.ReadFile("./" + fileName)
+		exitIfError(err, "File Read")
+		hexHash := createBlobObject(buff)
+		os.Stdout.Write([]byte(hexHash))
 
 	case "ls-tree":
 		treeSha := os.Args[3]
@@ -205,60 +67,7 @@ func main() {
 		treePath := ".git/objects/" + treeSha[:2] + "/" + treeSha[2:]
 		data, err := os.ReadFile(treePath)
 		exitIfError(err, "READ_FILE")
-
-		// Decompress to raw using zlib
-		reader, err := zlib.NewReader(bytes.NewReader(data))
-		exitIfError(err, "ZLIB")
-		var out bytes.Buffer
-		io.Copy(&out, reader)
-		if !bytes.HasPrefix(out.Bytes(), []byte("tree ")) {
-			fmt.Println("Error: Not tree!")
-			os.Exit(1)
-		}
-
-		// Split all the data with zero-byte as seperator into chunks
-		chunks := bytes.Split(out.Bytes(), []byte{0})
-		var size int
-		processed := 0
-		ftree := tree{}
-		var trees []tree
-
-		// Loop through all the chunks to get all data of tree object
-		for i, chunk := range chunks {
-			if i == 0 {
-				// This will be header of the tree object.
-				// So we can get size of actual content from here.
-				size, err = strconv.Atoi(strings.Split(string(chunk), " ")[1])
-				exitIfError(err, "INVALID_SIZE")
-				continue
-			}
-			// Add size of actual content processed.
-			processed += len(chunk)
-			if i == 1 {
-				metadata := strings.Split(string(chunk), " ")
-				ftree.perm = metadata[0]
-				ftree.name = metadata[1]
-			} else {
-				// These chunks will contain zero-byte index
-				// which got removed in splitting process.
-				// So add 1 byte of that zero index as all those
-				// bytes are also part of content.
-				processed += 1
-				ftree.sha = [20]byte(chunk)
-				trees = append(trees, ftree)
-				ftree = tree{}
-
-				// Last chunk will not contain any metadata for next file
-				// so stop doing any process of all the bytes were only
-				// contained sha1 (last chunk)
-				if processed == size {
-					break
-				}
-				metadata := strings.Split(string(chunk[20:]), " ")
-				ftree.perm = metadata[0]
-				ftree.name = metadata[1]
-			}
-		}
+		trees := decodeTreeObject(data, true)
 		for _, t := range trees {
 			fmt.Println(t.name)
 		}
@@ -270,12 +79,11 @@ func main() {
 		// }
 		// ignoreList := strings.Split(string(data), "\n")
 		// ignoreList = append(ignoreList, GIT_HOME)
-		hash := writeTreeObject(".", &permMap)
+		hash := createTreeObject(".", &permMap)
 		hexHash := hex.EncodeToString(hash)
 		os.Stdout.Write([]byte(hexHash))
 
 	case "commit-tree":
-		zeroIndex := byte(0)
 		hash := os.Args[2]
 		parent := os.Args[4]
 		message := os.Args[6]
@@ -290,18 +98,357 @@ func main() {
 			"committer " + authorName + " " + "<" + email + ">" + " " + strconv.Itoa(author_time) + " " + tz + "\n" +
 			"\n" +
 			message + "\n"
-
-		commit := "commit " + strconv.Itoa(len(commitContent)) + string(zeroIndex) + commitContent
-		commitHash := hashContent([]byte(commit))
-		commitHex := hex.EncodeToString(commitHash)
-		compressedCommit := compressContent([]byte(commit))
-		err := os.Mkdir(path.Join(".git", "objects", commitHex[:2]), 0755)
-		if err != nil && !os.IsExist(err) {
-			log.Fatal("DIR_CREATE FAILED")
-		}
-		err = os.WriteFile(path.Join(".git", "objects", commitHex[:2], commitHex[2:]), compressedCommit, 0644)
-		exitIfError(err, "FILE_WRITE")
+		commitHex := createCommitObject([]byte(commitContent))
 		os.Stdout.Write([]byte(commitHex))
+
+	case "clone":
+		gitUrl := os.Args[2]
+		dest := os.Args[3]
+		// Peform Ref Discovery
+		fmt.Println("Cloning repository in", dest)
+		refs := discoverRefs(gitUrl)
+
+		// Get Default Branch SHA
+		defaultBranchSha, symRef := getDefaultBranchFromRefs(refs)
+
+		// Get Pack File of default branch
+		packData := getPackDataFromBranchSha(gitUrl, defaultBranchSha)
+
+		/*
+			*  ###################### PACK FILE ###########################
+			*
+			*                  P  A  C  K |   Version   | Objects Nos
+			* Start Bytes --> 50 41 43 4B | 00 00 00 02 | 00 00 01 4C | Start of the objects...
+			* 332 Objects
+			*
+			* - OBJ_COMMIT (1)
+			* - OBJ_TREE (2)
+			* - OBJ_BLOB (3)
+			* - OBJ_TAG (4)
+			* - OBJ_OFS_DELTA (6)
+			* - OBJ_REF_DELTA (7)
+			*
+			* PackData:
+			* 	94 ||| 0F -> 1 | 001 | 0100  |||  0 | 000 | 1111
+			*
+			*   bin(start) -> MSB | Object Type  | Number ()
+					Legnth of Object: 263 bytes after inflation (Decompression)
+					Type of Object: 3 (Blob)
+			*
+				Other bytes -> MSB |
+				MSB: Wether nect byte is part of current integer
+			* 		Check: if byte is less than 128, which is 10000000
+			*
+			*   Object Type: See above for list
+			*
+		*/
+		version, objectsLength := getPackFileMetadata(packData)
+		if version == 2 {
+			// Verify checksum
+			fmt.Println("Verifying Packfile Cheksum...")
+			expectedSHA1Sum := []byte(packData[len(packData)-20:])
+			packData = packData[:len(packData)-20]
+			shaSum := hashContent([]byte(packData))
+			if string(expectedSHA1Sum) != string(shaSum) {
+				fmt.Println("Packfile checksum validation failed! Aborting...")
+				os.Exit(1)
+			}
+			fmt.Println("Checksum verified! Resolving Deltas...")
+
+			// Stores mapping of index to Hashed Objects
+			objectRefs := map[int]objectRef{}
+
+			// Stores mapping of hash to respective raw objects
+			blobObjects := map[string][]byte{}
+			treeObjects := map[string][]byte{}
+			commitObjects := map[string][]byte{}
+
+			cursor := 12
+			CurrentObjectStartIndex := 0
+			CurrentProccessingStatus := HeaderProcessingStart
+			CurrentOffsetObjectStart := -1
+
+			CurrentObjectType := Unsepcified
+			// CurrentObjectLength := -1
+
+			CurrentNegativeOffsetToBO := 0
+			latestCommitHex := ""
+
+			for {
+				b := packData[cursor]
+				// Start
+				if CurrentProccessingStatus == HeaderProcessingStart {
+					CurrentObjectLengthBits := ""
+					VariableLengthBytesProcessed := 0
+					for {
+						if CurrentProccessingStatus == HeaderProcessingStart {
+							CurrentObjectStartIndex = cursor
+							cursor++
+							CurrentObjectType = getObjectTypeFromMSB(b)
+							CurrentObjectLengthBits = getLengthBitsFromByte(b, true)
+							CurrentProccessingStatus = HeaderProcessing
+							// fmt.Println("HPS at", CurrentObjectStartIndex, "type", CurrentObjectType, CurrentObjectLengthBits)
+						} else {
+							b = packData[cursor]
+							cursor++
+							CurrentObjectLengthBits = getLengthBitsFromByte(b, false) + CurrentObjectLengthBits
+						}
+						VariableLengthBytesProcessed++
+						isMSB := isMSB(b)
+						if !isMSB {
+							// Last Header Byte
+
+							// fmt.Println("Last H Byte:", b, cursor, CurrentObjectLengthBits, CurrentObjectType)
+							// objectLength, err := strconv.ParseUint(CurrentObjectLengthBits, 2, 32)
+							// exitIfError(err, "LEN_PARSEUINT")
+							// CurrentObjectLength = int(objectLength)
+							if CurrentObjectType == OFSDelta || CurrentObjectType == REFDelta {
+								CurrentProccessingStatus = DeltifiedObjBasePtrExtractionStarts
+								CurrentOffsetObjectStart = cursor - VariableLengthBytesProcessed
+							} else {
+								CurrentProccessingStatus = UndeltifiedObjectExtractionStarts
+							}
+							break
+						}
+					}
+				} else if CurrentProccessingStatus == UndeltifiedObjectExtractionStarts {
+					out, unreadBuffLen := decompressContent([]byte(packData[cursor:]))
+					hexHash := ""
+					if CurrentObjectType == Commit {
+						hexHash = hex.EncodeToString(hashContent(writeHeaderToContent(out, Commit)))
+						// hexHash = createCommitObject(string(out))
+						commitObjects[hexHash] = out
+						if latestCommitHex == "" {
+							latestCommitHex = hexHash
+						}
+						// fmt.Println("Wrote Object ", hexHash)
+					} else if CurrentObjectType == Blob {
+						// Raw Blob Obejct
+						hexHash = hex.EncodeToString(hashContent(writeHeaderToContent(out, Blob)))
+						// hexHash = createBlobObject(out)
+						blobObjects[hexHash] = out
+						// fmt.Println("Wrote Object ", hexHash)
+					} else if CurrentObjectType == Tree {
+						// treeContent := "tree " + strconv.Itoa(len(out)) + string(byte(0)) + string(out)
+						// hash := hashContent([]byte(treeContent))
+						// hexHash = hex.EncodeToString(hash)
+						hexHash = hex.EncodeToString(hashContent(writeHeaderToContent(out, Tree)))
+						// writeObjectToDisk([]byte(treeContent), hexHash, true)
+						treeObjects[hexHash] = out
+						// fmt.Println("Wrote Object ", hexHash)
+					}
+					objectRefs[CurrentObjectStartIndex] = objectRef{
+						Hash:       hexHash,
+						ObjectType: CurrentObjectType,
+					}
+					CurrentProccessingStatus = HeaderProcessingStart
+					cursor += len(packData[cursor:]) - unreadBuffLen
+					// CurrentObjectLength = -1
+					CurrentObjectStartIndex = 0
+					CurrentObjectType = Unsepcified
+
+				} else if CurrentProccessingStatus == DeltifiedObjBasePtrExtractionStarts {
+					VariableLengthBytesProcessed := 0
+					CurrentNegativeOffsetToBOBits := ""
+					CurrentObjectStartIndex = cursor - 2
+					for {
+						b := packData[cursor]
+						isMSB := isMSB(b)
+						cursor++
+						CurrentNegativeOffsetToBOBits += getLengthBitsFromByte(b, false)
+						if VariableLengthBytesProcessed > 0 {
+							CurrentNegativeOffsetToBO += int(math.Pow(float64(BYTE_VAL), float64(VariableLengthBytesProcessed)))
+						}
+						if !isMSB {
+							converted, err := strconv.ParseUint(CurrentNegativeOffsetToBOBits, 2, 32)
+							exitIfError(err, "OFS_END_CONV")
+							CurrentNegativeOffsetToBO += int(converted)
+							CurrentProccessingStatus = DeltaObjectExtract
+							break
+						} else {
+							VariableLengthBytesProcessed++
+						}
+					}
+				} else if CurrentProccessingStatus == DeltaObjectExtract {
+					baseObjectRef := objectRefs[CurrentOffsetObjectStart-CurrentNegativeOffsetToBO]
+					baseObject := []byte{}
+					switch baseObjectRef.ObjectType {
+					case Commit:
+						baseObject = commitObjects[baseObjectRef.Hash]
+					case Tree:
+						baseObject = treeObjects[baseObjectRef.Hash]
+					case Blob:
+						baseObject = blobObjects[baseObjectRef.Hash]
+					}
+					// fmt.Println("base object", baseObjectRef)
+					out, unreadBuffLen := decompressContent([]byte(packData[cursor:]))
+					cursor += len(packData[cursor:]) - unreadBuffLen
+					_, newCursor, _ := calculateLengthFromVariableBytes(&out, 0)
+					_, newCursor, _ = calculateLengthFromVariableBytes(&out, newCursor)
+					// fmt.Println(sourceLength, targetLength, newCursor, "STLN")
+					// fmt.Println("OFS_PROC", CurrentNegativeOffsetToBO, CurrentOffsetObjectStart)
+					newContent := []byte{}
+					instructionProccessed := 0
+					for {
+						b := out[newCursor]
+						newCursor++
+						msb := isMSB(b)
+						bits := getOctetFromByte(b)
+						if msb {
+							// Copy
+							bytesConsumed := 0
+							instructionProccessed++
+							// +----------+---------+---------+---------+---------+-------+-------+-------+
+							// | 1xxxxxxx | offset1 | offset2 | offset3 | offset4 | size1 | size2 | size3 |
+							// +----------+---------+---------+---------+---------+-------+-------+-------+
+							baseObjStartOffsetBits := ""
+							CopySizeBits := ""
+							offsetBits := bits[4:]
+							lenghBits := bits[1:4]
+							for ind := range 3 {
+								offsetIndex := 3 - ind
+								bit := offsetBits[offsetIndex]
+								if string(bit) == "1" {
+									nextBits := getOctetFromByte(out[newCursor+uint(bytesConsumed)])
+									baseObjStartOffsetBits = nextBits + baseObjStartOffsetBits
+									bytesConsumed++
+								} else {
+									baseObjStartOffsetBits = "00000000" + baseObjStartOffsetBits
+								}
+							}
+
+							for ind := range 2 {
+								lengthIndex := 2 - ind
+								bit := lenghBits[lengthIndex]
+								if string(bit) == "1" {
+									nextBits := getOctetFromByte(out[newCursor+uint(bytesConsumed)])
+									CopySizeBits = nextBits + CopySizeBits
+									bytesConsumed++
+								} else {
+									CopySizeBits = "00000000" + CopySizeBits
+								}
+							}
+
+							offset, err := strconv.ParseUint(baseObjStartOffsetBits, 2, 32)
+							exitIfError(err, "PARSE_INT_O")
+							copySize, err := strconv.ParseUint(CopySizeBits, 2, 32)
+							exitIfError(err, "PARSE_INT_CSB")
+							// baseObjectRef := blobObjects[CurrentOffsetObjectStart-CurrentNegativeOffsetToBO]
+							start := int(offset)
+							end := start + int(copySize)
+							// fmt.Println(start, ":", end, "C", b, len(baseObject))
+							newContent = append(newContent, []byte(baseObject[start:end])...)
+							newCursor += uint(bytesConsumed)
+						} else {
+							// Insert
+							instructionProccessed++
+							SizeToInsert, err := strconv.ParseUint(bits, 2, 32)
+							exitIfError(err, "PARSEINT_SI")
+							start := newCursor
+							end := newCursor + uint(SizeToInsert)
+							// fmt.Println(start, ":", end, "I", b)
+							newContent = append(newContent, out[start:end]...)
+							newCursor += uint(SizeToInsert)
+							// fmt.Println("#########################", newCursor, len(out), "I")
+						}
+						if int(newCursor) == len(out) {
+							// fmt.Println("#########################", newCursor, CurrentObjectStartIndex, len(out), cursor, "FIN")
+							hexHash := ""
+							switch baseObjectRef.ObjectType {
+							case Commit:
+								hexHash = hex.EncodeToString(hashContent(writeHeaderToContent(newContent, Commit)))
+								// hexHash = createCommitObject(string(newContent))
+								commitObjects[hexHash] = newContent
+								// fmt.Println("Wrote Object ", hexHash)
+							case Blob:
+								hexHash = hex.EncodeToString(hashContent(writeHeaderToContent(newContent, Blob)))
+								blobObjects[hexHash] = newContent
+
+								// fmt.Println("Wrote Object ", hexHash)
+							case Tree:
+								// treeContent := "tree " + strconv.Itoa(len(newContent)) + string(byte(0)) + string(newContent)
+								// hash := hashContent([]byte(treeContent))
+								// hexHash = hex.EncodeToString(hash)
+								// writeObjectToDisk([]byte(treeContent), hexHash, true)
+								hexHash = hex.EncodeToString(hashContent(writeHeaderToContent(newContent, Tree)))
+								treeObjects[hexHash] = newContent
+								// fmt.Println("Wrote Object ", hexHash)
+							}
+							objectRefs[CurrentObjectStartIndex] = objectRef{
+								Hash:       hexHash,
+								ObjectType: baseObjectRef.ObjectType,
+							}
+							CurrentProccessingStatus = HeaderProcessingStart
+							// CurrentObjectLength = -1
+							CurrentObjectStartIndex = 0
+							CurrentObjectType = Unsepcified
+							CurrentOffsetObjectStart = -1
+							// CurrentObjectLength = -1
+							CurrentNegativeOffsetToBO = 0
+							break
+						}
+					}
+				}
+				if cursor == len(packData) {
+					proccessedObjectLength := len(blobObjects) + len(treeObjects) + len(commitObjects)
+					if proccessedObjectLength == int(objectsLength) {
+						latestCommit := string(commitObjects[latestCommitHex])
+						latestTree := treeObjects[latestCommit[5:45]]
+						fmt.Println("Writing Objects...")
+						splits := strings.Split(symRef, "/")
+						branchName := splits[len(splits)-1]
+						os.MkdirAll(path.Join(CWD, dest, ".git", "objects"), 0644)
+						os.MkdirAll(path.Join(CWD, dest, ".git", "refs", "heads"), 0644)
+						os.WriteFile(path.Join(CWD, dest, ".git", "HEAD"), []byte("ref:"+symRef), 0755)
+						os.WriteFile(path.Join(CWD, dest, ".git", "refs", "heads", branchName), []byte(latestCommitHex), 0755)
+						treeContent := writeHeaderToContent(latestTree, Tree)
+						trees := decodeTreeObject(treeContent, false)
+						var writeTree func(string, []tree)
+						for hexHash, blob := range blobObjects {
+							writeObjectToDisk(writeHeaderToContent(blob, Blob), hexHash, true, path.Join(CWD, dest))
+						}
+						for hexHash, tree := range treeObjects {
+							writeObjectToDisk(writeHeaderToContent(tree, Tree), hexHash, true, path.Join(CWD, dest))
+						}
+						for hexHash, commit := range commitObjects {
+							writeObjectToDisk(writeHeaderToContent(commit, Commit), hexHash, true, path.Join(CWD, dest))
+						}
+						fmt.Println("Resolving Files...")
+						writeTree = func(destination string, trees []tree) {
+							for _, tree := range trees {
+								hexHash := hex.EncodeToString(tree.sha[:])
+								rootPath := destination
+								if tree.perm == "100644" {
+									err := os.MkdirAll(rootPath, 0644)
+									if err != nil {
+										panic(err)
+									}
+									err = os.WriteFile(path.Join(".", rootPath, tree.name), blobObjects[hexHash], 0755)
+									if err != nil {
+										panic(err)
+									}
+								} else if tree.perm == "40000" {
+									treeObject := treeObjects[hexHash]
+									treeContent := writeHeaderToContent(treeObject, Tree)
+									latestTrees := decodeTreeObject(treeContent, false)
+									writeTree(path.Join(".", rootPath, tree.name), latestTrees)
+								} else {
+									fmt.Println("Unhandled tree:", tree)
+								}
+							}
+						}
+						writeTree(dest, trees)
+						fmt.Println("Done!")
+						// fmt.Println("Length verified! looks all good!")
+					} else {
+						fmt.Println("Length mismatch detected!", proccessedObjectLength, objectsLength)
+					}
+					return
+				}
+			}
+		} else {
+			log.Fatal("This program only supports version 2 packfile as of now")
+		}
 
 	default:
 		fmt.Fprintf(os.Stderr, "Unknown command %s\n", command)
