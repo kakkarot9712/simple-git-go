@@ -41,13 +41,22 @@ const (
 	HeaderProcessing
 	UndeltifiedObjectExtractionStarts
 	DeltifiedObjBasePtrExtractionStarts
-	DeltaObjectPatchData
-	DeltaObjectExtract
 )
 
+type ofsRefObject struct {
+	object          []byte
+	baseObjectIndex int
+}
+
+type gitObject struct {
+	objectType Object
+	content    []byte
+}
+
 type objectRef struct {
-	Hash       string
-	ObjectType Object
+	Hash            string
+	ObjectType      Object
+	BaseObjectIndex int
 }
 
 func createBlobObject(data []byte) string {
@@ -220,6 +229,79 @@ func decodeTreeObject(rawTree []byte, compressed bool) []tree {
 		trees = append(trees, ftree)
 		if cursor == len(out) {
 			return trees
+		}
+	}
+}
+
+func resolveOfsDelta(baseObject []byte, refObject []byte) []byte {
+	out := refObject
+	_, newCursor, _ := calculateLengthFromVariableBytes(&out, 0)
+	_, newCursor, _ = calculateLengthFromVariableBytes(&out, newCursor)
+	newContent := []byte{}
+	instructionProccessed := 0
+	for {
+		b := out[newCursor]
+		newCursor++
+		msb := isMSB(b)
+		bits := getOctetFromByte(b)
+		if msb {
+			// Copy
+			bytesConsumed := 0
+			instructionProccessed++
+			// +----------+---------+---------+---------+---------+-------+-------+-------+
+			// | 1xxxxxxx | offset1 | offset2 | offset3 | offset4 | size1 | size2 | size3 |
+			// +----------+---------+---------+---------+---------+-------+-------+-------+
+			baseObjStartOffsetBits := ""
+			CopySizeBits := ""
+			offsetBits := bits[4:]
+			lenghBits := bits[1:4]
+			for ind := range 3 {
+				offsetIndex := 3 - ind
+				bit := offsetBits[offsetIndex]
+				if string(bit) == "1" {
+					nextBits := getOctetFromByte(out[newCursor+uint(bytesConsumed)])
+					baseObjStartOffsetBits = nextBits + baseObjStartOffsetBits
+					bytesConsumed++
+				} else {
+					baseObjStartOffsetBits = "00000000" + baseObjStartOffsetBits
+				}
+			}
+			for ind := range 2 {
+				lengthIndex := 2 - ind
+				bit := lenghBits[lengthIndex]
+				if string(bit) == "1" {
+					nextBits := getOctetFromByte(out[newCursor+uint(bytesConsumed)])
+					CopySizeBits = nextBits + CopySizeBits
+					bytesConsumed++
+				} else {
+					CopySizeBits = "00000000" + CopySizeBits
+				}
+			}
+			offset, err := strconv.ParseUint(baseObjStartOffsetBits, 2, 32)
+			exitIfError(err, "PARSE_INT_O")
+			copySize, err := strconv.ParseUint(CopySizeBits, 2, 32)
+			exitIfError(err, "PARSE_INT_CSB")
+			// baseObjectRef := blobObjects[CurrentOffsetObjectStart-CurrentNegativeOffsetToBO]
+			start := int(offset)
+			end := start + int(copySize)
+			// fmt.Println(start, ":", end, "C", b, len(baseObject), cursor, newCursor)
+			newContent = append(newContent, []byte(baseObject[start:end])...)
+			newCursor += uint(bytesConsumed)
+		} else {
+			// Insert
+			instructionProccessed++
+			SizeToInsert, err := strconv.ParseUint(bits, 2, 32)
+			exitIfError(err, "PARSEINT_SI")
+			start := newCursor
+			end := newCursor + uint(SizeToInsert)
+			// fmt.Println(start, ":", end, "I", b)
+			newContent = append(newContent, out[start:end]...)
+			newCursor += uint(SizeToInsert)
+			// fmt.Println("#########################", newCursor, len(out), "I")
+		}
+		if int(newCursor) == len(out) {
+			// fmt.Println("#########################", newCursor, CurrentObjectStartIndex, len(out), cursor, "FIN")
+			return newContent
 		}
 	}
 }

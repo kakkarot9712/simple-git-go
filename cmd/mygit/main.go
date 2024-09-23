@@ -153,15 +153,14 @@ func main() {
 				fmt.Println("Packfile checksum validation failed! Aborting...")
 				os.Exit(1)
 			}
-			fmt.Println("Checksum verified! Resolving Deltas...")
+			fmt.Println("Checksum verified! Resolving Objects...")
 
 			// Stores mapping of index to Hashed Objects
 			objectRefs := map[int]objectRef{}
 
 			// Stores mapping of hash to respective raw objects
-			blobObjects := map[string][]byte{}
-			treeObjects := map[string][]byte{}
-			commitObjects := map[string][]byte{}
+			objects := map[string]gitObject{}
+			ofsRefDeltas := []ofsRefObject{}
 
 			cursor := 12
 			CurrentObjectStartIndex := 0
@@ -173,7 +172,6 @@ func main() {
 
 			CurrentNegativeOffsetToBO := 0
 			latestCommitHex := ""
-
 			for {
 				b := packData[cursor]
 				// Start
@@ -197,14 +195,11 @@ func main() {
 						isMSB := isMSB(b)
 						if !isMSB {
 							// Last Header Byte
-
-							// fmt.Println("Last H Byte:", b, cursor, CurrentObjectLengthBits, CurrentObjectType)
-							// objectLength, err := strconv.ParseUint(CurrentObjectLengthBits, 2, 32)
-							// exitIfError(err, "LEN_PARSEUINT")
-							// CurrentObjectLength = int(objectLength)
-							if CurrentObjectType == OFSDelta || CurrentObjectType == REFDelta {
+							if CurrentObjectType == OFSDelta {
 								CurrentProccessingStatus = DeltifiedObjBasePtrExtractionStarts
 								CurrentOffsetObjectStart = cursor - VariableLengthBytesProcessed
+							} else if CurrentObjectType == REFDelta {
+								log.Fatal("Repository with RefData is not supported as of now!")
 							} else {
 								CurrentProccessingStatus = UndeltifiedObjectExtractionStarts
 							}
@@ -213,44 +208,26 @@ func main() {
 					}
 				} else if CurrentProccessingStatus == UndeltifiedObjectExtractionStarts {
 					out, unreadBuffLen := decompressContent([]byte(packData[cursor:]))
-					hexHash := ""
-					if CurrentObjectType == Commit {
-						hexHash = hex.EncodeToString(hashContent(writeHeaderToContent(out, Commit)))
-						// hexHash = createCommitObject(string(out))
-						commitObjects[hexHash] = out
-						if latestCommitHex == "" {
-							latestCommitHex = hexHash
-						}
-						// fmt.Println("Wrote Object ", hexHash)
-					} else if CurrentObjectType == Blob {
-						// Raw Blob Obejct
-						hexHash = hex.EncodeToString(hashContent(writeHeaderToContent(out, Blob)))
-						// hexHash = createBlobObject(out)
-						blobObjects[hexHash] = out
-						// fmt.Println("Wrote Object ", hexHash)
-					} else if CurrentObjectType == Tree {
-						// treeContent := "tree " + strconv.Itoa(len(out)) + string(byte(0)) + string(out)
-						// hash := hashContent([]byte(treeContent))
-						// hexHash = hex.EncodeToString(hash)
-						hexHash = hex.EncodeToString(hashContent(writeHeaderToContent(out, Tree)))
-						// writeObjectToDisk([]byte(treeContent), hexHash, true)
-						treeObjects[hexHash] = out
-						// fmt.Println("Wrote Object ", hexHash)
+					hexHash := hex.EncodeToString(hashContent(writeHeaderToContent(out, CurrentObjectType)))
+					objects[hexHash] = gitObject{
+						objectType: CurrentObjectType,
+						content:    out,
 					}
 					objectRefs[CurrentObjectStartIndex] = objectRef{
 						Hash:       hexHash,
 						ObjectType: CurrentObjectType,
 					}
+					if CurrentObjectType == Commit && latestCommitHex == "" {
+						latestCommitHex = hexHash
+					}
 					CurrentProccessingStatus = HeaderProcessingStart
 					cursor += len(packData[cursor:]) - unreadBuffLen
-					// CurrentObjectLength = -1
 					CurrentObjectStartIndex = 0
 					CurrentObjectType = Unsepcified
 
 				} else if CurrentProccessingStatus == DeltifiedObjBasePtrExtractionStarts {
 					VariableLengthBytesProcessed := 0
 					CurrentNegativeOffsetToBOBits := ""
-					CurrentObjectStartIndex = cursor - 2
 					for {
 						b := packData[cursor]
 						isMSB := isMSB(b)
@@ -263,138 +240,56 @@ func main() {
 							converted, err := strconv.ParseUint(CurrentNegativeOffsetToBOBits, 2, 32)
 							exitIfError(err, "OFS_END_CONV")
 							CurrentNegativeOffsetToBO += int(converted)
-							CurrentProccessingStatus = DeltaObjectExtract
+							objectRefs[CurrentOffsetObjectStart] = objectRef{
+								ObjectType:      CurrentObjectType,
+								BaseObjectIndex: CurrentOffsetObjectStart - CurrentNegativeOffsetToBO,
+							}
 							break
 						} else {
 							VariableLengthBytesProcessed++
 						}
 					}
-				} else if CurrentProccessingStatus == DeltaObjectExtract {
-					baseObjectRef := objectRefs[CurrentOffsetObjectStart-CurrentNegativeOffsetToBO]
-					baseObject := []byte{}
-					switch baseObjectRef.ObjectType {
-					case Commit:
-						baseObject = commitObjects[baseObjectRef.Hash]
-					case Tree:
-						baseObject = treeObjects[baseObjectRef.Hash]
-					case Blob:
-						baseObject = blobObjects[baseObjectRef.Hash]
-					}
-					// fmt.Println("base object", baseObjectRef)
+
+					ofsObject := ofsRefObject{baseObjectIndex: CurrentOffsetObjectStart - CurrentNegativeOffsetToBO}
+					// fmt.Println("OFS with start of", CurrentOffsetObjectStart, "at index", CurrentOffsetObjectStart-CurrentNegativeOffsetToBO, cursor)
 					out, unreadBuffLen := decompressContent([]byte(packData[cursor:]))
+					ofsObject.object = out
+					ofsRefDeltas = append(ofsRefDeltas, ofsObject)
 					cursor += len(packData[cursor:]) - unreadBuffLen
-					_, newCursor, _ := calculateLengthFromVariableBytes(&out, 0)
-					_, newCursor, _ = calculateLengthFromVariableBytes(&out, newCursor)
+					CurrentProccessingStatus = HeaderProcessingStart
+					// CurrentObjectLength = -1
+					CurrentObjectStartIndex = 0
+					CurrentObjectType = Unsepcified
+					CurrentOffsetObjectStart = -1
+					// CurrentObjectLength = -1
+					CurrentNegativeOffsetToBO = 0
 					// fmt.Println(sourceLength, targetLength, newCursor, "STLN")
 					// fmt.Println("OFS_PROC", CurrentNegativeOffsetToBO, CurrentOffsetObjectStart)
-					newContent := []byte{}
-					instructionProccessed := 0
-					for {
-						b := out[newCursor]
-						newCursor++
-						msb := isMSB(b)
-						bits := getOctetFromByte(b)
-						if msb {
-							// Copy
-							bytesConsumed := 0
-							instructionProccessed++
-							// +----------+---------+---------+---------+---------+-------+-------+-------+
-							// | 1xxxxxxx | offset1 | offset2 | offset3 | offset4 | size1 | size2 | size3 |
-							// +----------+---------+---------+---------+---------+-------+-------+-------+
-							baseObjStartOffsetBits := ""
-							CopySizeBits := ""
-							offsetBits := bits[4:]
-							lenghBits := bits[1:4]
-							for ind := range 3 {
-								offsetIndex := 3 - ind
-								bit := offsetBits[offsetIndex]
-								if string(bit) == "1" {
-									nextBits := getOctetFromByte(out[newCursor+uint(bytesConsumed)])
-									baseObjStartOffsetBits = nextBits + baseObjStartOffsetBits
-									bytesConsumed++
-								} else {
-									baseObjStartOffsetBits = "00000000" + baseObjStartOffsetBits
-								}
-							}
-
-							for ind := range 2 {
-								lengthIndex := 2 - ind
-								bit := lenghBits[lengthIndex]
-								if string(bit) == "1" {
-									nextBits := getOctetFromByte(out[newCursor+uint(bytesConsumed)])
-									CopySizeBits = nextBits + CopySizeBits
-									bytesConsumed++
-								} else {
-									CopySizeBits = "00000000" + CopySizeBits
-								}
-							}
-
-							offset, err := strconv.ParseUint(baseObjStartOffsetBits, 2, 32)
-							exitIfError(err, "PARSE_INT_O")
-							copySize, err := strconv.ParseUint(CopySizeBits, 2, 32)
-							exitIfError(err, "PARSE_INT_CSB")
-							// baseObjectRef := blobObjects[CurrentOffsetObjectStart-CurrentNegativeOffsetToBO]
-							start := int(offset)
-							end := start + int(copySize)
-							// fmt.Println(start, ":", end, "C", b, len(baseObject))
-							newContent = append(newContent, []byte(baseObject[start:end])...)
-							newCursor += uint(bytesConsumed)
-						} else {
-							// Insert
-							instructionProccessed++
-							SizeToInsert, err := strconv.ParseUint(bits, 2, 32)
-							exitIfError(err, "PARSEINT_SI")
-							start := newCursor
-							end := newCursor + uint(SizeToInsert)
-							// fmt.Println(start, ":", end, "I", b)
-							newContent = append(newContent, out[start:end]...)
-							newCursor += uint(SizeToInsert)
-							// fmt.Println("#########################", newCursor, len(out), "I")
-						}
-						if int(newCursor) == len(out) {
-							// fmt.Println("#########################", newCursor, CurrentObjectStartIndex, len(out), cursor, "FIN")
-							hexHash := ""
-							switch baseObjectRef.ObjectType {
-							case Commit:
-								hexHash = hex.EncodeToString(hashContent(writeHeaderToContent(newContent, Commit)))
-								// hexHash = createCommitObject(string(newContent))
-								commitObjects[hexHash] = newContent
-								// fmt.Println("Wrote Object ", hexHash)
-							case Blob:
-								hexHash = hex.EncodeToString(hashContent(writeHeaderToContent(newContent, Blob)))
-								blobObjects[hexHash] = newContent
-
-								// fmt.Println("Wrote Object ", hexHash)
-							case Tree:
-								// treeContent := "tree " + strconv.Itoa(len(newContent)) + string(byte(0)) + string(newContent)
-								// hash := hashContent([]byte(treeContent))
-								// hexHash = hex.EncodeToString(hash)
-								// writeObjectToDisk([]byte(treeContent), hexHash, true)
-								hexHash = hex.EncodeToString(hashContent(writeHeaderToContent(newContent, Tree)))
-								treeObjects[hexHash] = newContent
-								// fmt.Println("Wrote Object ", hexHash)
-							}
-							objectRefs[CurrentObjectStartIndex] = objectRef{
-								Hash:       hexHash,
-								ObjectType: baseObjectRef.ObjectType,
-							}
-							CurrentProccessingStatus = HeaderProcessingStart
-							// CurrentObjectLength = -1
-							CurrentObjectStartIndex = 0
-							CurrentObjectType = Unsepcified
-							CurrentOffsetObjectStart = -1
-							// CurrentObjectLength = -1
-							CurrentNegativeOffsetToBO = 0
-							break
-						}
-					}
 				}
 				if cursor == len(packData) {
-					proccessedObjectLength := len(blobObjects) + len(treeObjects) + len(commitObjects)
+					fmt.Println("Resolving Deltas...")
+					for _, delta := range ofsRefDeltas {
+						baseObjectRef := objectRefs[delta.baseObjectIndex]
+						// fmt.Println(delta.baseObjectIndex, "BOI")
+						if baseObjectRef.ObjectType == OFSDelta {
+							baseObjectRef = objectRefs[baseObjectRef.BaseObjectIndex]
+						}
+						content := resolveOfsDelta(objects[baseObjectRef.Hash].content, delta.object)
+						hexHash := hex.EncodeToString(hashContent(writeHeaderToContent(content, baseObjectRef.ObjectType)))
+						objects[hexHash] = gitObject{
+							objectType: baseObjectRef.ObjectType,
+							content:    content,
+						}
+						objectRefs[delta.baseObjectIndex] = objectRef{
+							Hash:            hexHash,
+							ObjectType:      baseObjectRef.ObjectType,
+							BaseObjectIndex: 0,
+						}
+					}
+					proccessedObjectLength := len(objects)
 					if proccessedObjectLength == int(objectsLength) {
-						latestCommit := string(commitObjects[latestCommitHex])
-						latestTree := treeObjects[latestCommit[5:45]]
-						fmt.Println("Writing Objects...")
+						latestCommit := string(objects[latestCommitHex].content)
+						latestTree := objects[latestCommit[5:45]].content
 						splits := strings.Split(symRef, "/")
 						branchName := splits[len(splits)-1]
 						os.MkdirAll(path.Join(CWD, dest, ".git", "objects"), 0644)
@@ -404,16 +299,9 @@ func main() {
 						treeContent := writeHeaderToContent(latestTree, Tree)
 						trees := decodeTreeObject(treeContent, false)
 						var writeTree func(string, []tree)
-						for hexHash, blob := range blobObjects {
-							writeObjectToDisk(writeHeaderToContent(blob, Blob), hexHash, true, path.Join(CWD, dest))
+						for hexHash, obj := range objects {
+							writeObjectToDisk(writeHeaderToContent(obj.content, obj.objectType), hexHash, true, path.Join(CWD, dest))
 						}
-						for hexHash, tree := range treeObjects {
-							writeObjectToDisk(writeHeaderToContent(tree, Tree), hexHash, true, path.Join(CWD, dest))
-						}
-						for hexHash, commit := range commitObjects {
-							writeObjectToDisk(writeHeaderToContent(commit, Commit), hexHash, true, path.Join(CWD, dest))
-						}
-						fmt.Println("Resolving Files...")
 						writeTree = func(destination string, trees []tree) {
 							for _, tree := range trees {
 								hexHash := hex.EncodeToString(tree.sha[:])
@@ -423,12 +311,12 @@ func main() {
 									if err != nil {
 										panic(err)
 									}
-									err = os.WriteFile(path.Join(".", rootPath, tree.name), blobObjects[hexHash], 0755)
+									err = os.WriteFile(path.Join(".", rootPath, tree.name), objects[hexHash].content, 0755)
 									if err != nil {
 										panic(err)
 									}
 								} else if tree.perm == "40000" {
-									treeObject := treeObjects[hexHash]
+									treeObject := objects[hexHash].content
 									treeContent := writeHeaderToContent(treeObject, Tree)
 									latestTrees := decodeTreeObject(treeContent, false)
 									writeTree(path.Join(".", rootPath, tree.name), latestTrees)
@@ -441,7 +329,7 @@ func main() {
 						fmt.Println("Done!")
 						// fmt.Println("Length verified! looks all good!")
 					} else {
-						fmt.Println("Length mismatch detected!", proccessedObjectLength, objectsLength)
+						log.Fatal("Length mismatch detected!", proccessedObjectLength, objectsLength)
 					}
 					return
 				}
