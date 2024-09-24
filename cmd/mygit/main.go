@@ -115,33 +115,32 @@ func main() {
 		packData := getPackDataFromBranchSha(gitUrl, defaultBranchSha)
 
 		/*
-			*  ###################### PACK FILE ###########################
-			*
-			*                  P  A  C  K |   Version   | Objects Nos
-			* Start Bytes --> 50 41 43 4B | 00 00 00 02 | 00 00 01 4C | Start of the objects...
-			* 332 Objects
-			*
-			* - OBJ_COMMIT (1)
-			* - OBJ_TREE (2)
-			* - OBJ_BLOB (3)
-			* - OBJ_TAG (4)
-			* - OBJ_OFS_DELTA (6)
-			* - OBJ_REF_DELTA (7)
-			*
-			* PackData:
-			* 	94 ||| 0F -> 1 | 001 | 0100  |||  0 | 000 | 1111
-			*
-			*   bin(start) -> MSB | Object Type  | Number ()
-					Legnth of Object: 263 bytes after inflation (Decompression)
-					Type of Object: 3 (Blob)
-			*
-				Other bytes -> MSB |
-				MSB: Wether nect byte is part of current integer
-			* 		Check: if byte is less than 128, which is 10000000
-			*
-			*   Object Type: See above for list
-			*
-		*/
+		*  ###################### PACK FILE ###########################
+		*
+		*                  P  A  C  K |   Version   | Objects Nos
+		* Start Bytes --> 50 41 43 4B | 00 00 00 02 | 00 00 01 4C | Start of the objects...
+		* 332 Objects
+		*
+		* PackData:
+		* 	94 ||| 0F -> 1 | 001 | 0100  |||  0 | 000 | 1111
+		*
+		*   bin(start) -> MSB | Object Type  | Number ()
+		*		Legnth of Object: 263 bytes after inflation (Decompression)
+		*		Type of Object: 3 (Blob)
+		*
+		*	Other bytes -> MSB |
+		*		MSB: Wether nect byte is part of current integer
+		* 		Check: if byte is less than 128, which is 10000000
+		*
+		*   Object Type: See below list
+		*
+		* - OBJ_COMMIT (1)
+		* - OBJ_TREE (2)
+		* - OBJ_BLOB (3)
+		* - OBJ_TAG (4) ---> Not supported as of now
+		* - OBJ_OFS_DELTA (6)
+		* - OBJ_REF_DELTA (7) ---> Not supported as of now
+		 */
 		version, objectsLength := getPackFileMetadata(packData)
 		if version == 2 {
 			// Verify checksum
@@ -168,13 +167,10 @@ func main() {
 			CurrentOffsetObjectStart := -1
 
 			CurrentObjectType := Unsepcified
-			// CurrentObjectLength := -1
-
 			CurrentNegativeOffsetToBO := 0
 			latestCommitHex := ""
 			for {
 				b := packData[cursor]
-				// Start
 				if CurrentProccessingStatus == HeaderProcessingStart {
 					CurrentObjectLengthBits := ""
 					VariableLengthBytesProcessed := 0
@@ -185,7 +181,6 @@ func main() {
 							CurrentObjectType = getObjectTypeFromMSB(b)
 							CurrentObjectLengthBits = getLengthBitsFromByte(b, true)
 							CurrentProccessingStatus = HeaderProcessing
-							// fmt.Println("HPS at", CurrentObjectStartIndex, "type", CurrentObjectType, CurrentObjectLengthBits)
 						} else {
 							b = packData[cursor]
 							cursor++
@@ -194,7 +189,6 @@ func main() {
 						VariableLengthBytesProcessed++
 						isMSB := isMSB(b)
 						if !isMSB {
-							// Last Header Byte
 							if CurrentObjectType == OFSDelta {
 								CurrentProccessingStatus = DeltifiedObjBasePtrExtractionStarts
 								CurrentOffsetObjectStart = cursor - VariableLengthBytesProcessed
@@ -224,7 +218,6 @@ func main() {
 					cursor += len(packData[cursor:]) - unreadBuffLen
 					CurrentObjectStartIndex = 0
 					CurrentObjectType = Unsepcified
-
 				} else if CurrentProccessingStatus == DeltifiedObjBasePtrExtractionStarts {
 					VariableLengthBytesProcessed := 0
 					CurrentNegativeOffsetToBOBits := ""
@@ -250,29 +243,26 @@ func main() {
 						}
 					}
 
-					ofsObject := ofsRefObject{baseObjectIndex: CurrentOffsetObjectStart - CurrentNegativeOffsetToBO}
-					// fmt.Println("OFS with start of", CurrentOffsetObjectStart, "at index", CurrentOffsetObjectStart-CurrentNegativeOffsetToBO, cursor)
+					ofsObject := ofsRefObject{baseObjectIndex: CurrentOffsetObjectStart - CurrentNegativeOffsetToBO, currentObjectIndex: CurrentObjectStartIndex}
 					out, unreadBuffLen := decompressContent([]byte(packData[cursor:]))
 					ofsObject.object = out
 					ofsRefDeltas = append(ofsRefDeltas, ofsObject)
 					cursor += len(packData[cursor:]) - unreadBuffLen
 					CurrentProccessingStatus = HeaderProcessingStart
-					// CurrentObjectLength = -1
 					CurrentObjectStartIndex = 0
 					CurrentObjectType = Unsepcified
 					CurrentOffsetObjectStart = -1
-					// CurrentObjectLength = -1
 					CurrentNegativeOffsetToBO = 0
-					// fmt.Println(sourceLength, targetLength, newCursor, "STLN")
-					// fmt.Println("OFS_PROC", CurrentNegativeOffsetToBO, CurrentOffsetObjectStart)
 				}
 				if cursor == len(packData) {
 					fmt.Println("Resolving Deltas...")
 					for _, delta := range ofsRefDeltas {
 						baseObjectRef := objectRefs[delta.baseObjectIndex]
-						// fmt.Println(delta.baseObjectIndex, "BOI")
 						if baseObjectRef.ObjectType == OFSDelta {
 							baseObjectRef = objectRefs[baseObjectRef.BaseObjectIndex]
+							if baseObjectRef.ObjectType == OFSDelta {
+								log.Fatal("RECURSE_DELTA_MULTEDEP: ", baseObjectRef.BaseObjectIndex)
+							}
 						}
 						content := resolveOfsDelta(objects[baseObjectRef.Hash].content, delta.object)
 						hexHash := hex.EncodeToString(hashContent(writeHeaderToContent(content, baseObjectRef.ObjectType)))
@@ -280,7 +270,7 @@ func main() {
 							objectType: baseObjectRef.ObjectType,
 							content:    content,
 						}
-						objectRefs[delta.baseObjectIndex] = objectRef{
+						objectRefs[delta.currentObjectIndex] = objectRef{
 							Hash:            hexHash,
 							ObjectType:      baseObjectRef.ObjectType,
 							BaseObjectIndex: 0,
@@ -327,7 +317,6 @@ func main() {
 						}
 						writeTree(dest, trees)
 						fmt.Println("Done!")
-						// fmt.Println("Length verified! looks all good!")
 					} else {
 						log.Fatal("Length mismatch detected!", proccessedObjectLength, objectsLength)
 					}
@@ -337,7 +326,6 @@ func main() {
 		} else {
 			log.Fatal("This program only supports version 2 packfile as of now")
 		}
-
 	default:
 		fmt.Fprintf(os.Stderr, "Unknown command %s\n", command)
 		os.Exit(1)

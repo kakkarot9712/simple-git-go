@@ -44,8 +44,9 @@ const (
 )
 
 type ofsRefObject struct {
-	object          []byte
-	baseObjectIndex int
+	object             []byte
+	baseObjectIndex    int
+	currentObjectIndex int
 }
 
 type gitObject struct {
@@ -281,10 +282,12 @@ func resolveOfsDelta(baseObject []byte, refObject []byte) []byte {
 			exitIfError(err, "PARSE_INT_O")
 			copySize, err := strconv.ParseUint(CopySizeBits, 2, 32)
 			exitIfError(err, "PARSE_INT_CSB")
-			// baseObjectRef := blobObjects[CurrentOffsetObjectStart-CurrentNegativeOffsetToBO]
+			if copySize == 0 {
+				// size zero is automatically converted to 0x10000 which is 65536 in Decimal
+				copySize = 65536
+			}
 			start := int(offset)
 			end := start + int(copySize)
-			// fmt.Println(start, ":", end, "C", b, len(baseObject), cursor, newCursor)
 			newContent = append(newContent, []byte(baseObject[start:end])...)
 			newCursor += uint(bytesConsumed)
 		} else {
@@ -294,13 +297,10 @@ func resolveOfsDelta(baseObject []byte, refObject []byte) []byte {
 			exitIfError(err, "PARSEINT_SI")
 			start := newCursor
 			end := newCursor + uint(SizeToInsert)
-			// fmt.Println(start, ":", end, "I", b)
 			newContent = append(newContent, out[start:end]...)
 			newCursor += uint(SizeToInsert)
-			// fmt.Println("#########################", newCursor, len(out), "I")
 		}
 		if int(newCursor) == len(out) {
-			// fmt.Println("#########################", newCursor, CurrentObjectStartIndex, len(out), cursor, "FIN")
 			return newContent
 		}
 	}
