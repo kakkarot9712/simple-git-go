@@ -15,8 +15,17 @@ import (
 	"strings"
 )
 
+type ObjectPerm string
+
+const (
+	FILE    ObjectPerm = "100644"
+	EXE     ObjectPerm = "100755"
+	SYMLINK ObjectPerm = "120000"
+	DIR     ObjectPerm = "040000"
+)
+
 type tree struct {
-	perm string
+	perm ObjectPerm
 	name string
 	sha  [20]byte
 }
@@ -181,8 +190,11 @@ func getPackFileMetadata(packfile string) (version uint32, objectsLength uint32)
 	return
 }
 
-func decodeBlobObject(blob []byte) []byte {
-	rawData, _ := decompressContent(blob)
+func decodeBlobObject(blob []byte, compressed bool) []byte {
+	rawData := blob
+	if compressed {
+		rawData, _ = decompressContent(blob)
+	}
 	splits := strings.Split(string(rawData), " ")
 	if splits[0] != "blob" {
 		fmt.Println("Error: Not a Blob")
@@ -223,9 +235,12 @@ func decodeTreeObject(rawTree []byte, compressed bool) []tree {
 	for {
 		spIndex := bytes.Index(out[cursor:], []byte(" "))
 		zeroIndex := bytes.Index(out[cursor:], []byte{0})
-		ftree.perm = string(out[cursor : cursor+spIndex])
+		ftree.perm = ObjectPerm(out[cursor : cursor+spIndex])
 		ftree.name = string(out[cursor+spIndex+1 : cursor+zeroIndex])
 		ftree.sha = [20]byte(out[cursor+zeroIndex+1 : cursor+zeroIndex+1+20])
+		for range 6 - len(ftree.perm) {
+			ftree.perm = "0" + ftree.perm
+		}
 		cursor += zeroIndex + 20 + 1
 		trees = append(trees, ftree)
 		if cursor == len(out) {

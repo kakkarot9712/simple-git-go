@@ -1,18 +1,17 @@
 package main
 
 import (
+	"bytes"
 	"encoding/hex"
+	"flag"
 	"fmt"
 	"log"
 	"math"
-	"path"
+	"os"
+	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
-
-	// Uncomment this block to pass the first stage!
-
-	"os"
-	// ""
 )
 
 // Usage: your_program.sh <command> <arg1> <arg2> ...
@@ -20,65 +19,142 @@ func main() {
 	permMap := map[string]uint32{"file": 100644, "exe": 100755, "symlink": 120000, "dir": 40000}
 	BYTE_VAL := 128
 	CWD, err := os.Getwd()
-	exitIfError(err, "CWD")
-	// You can use print statements as follows for debugging, they'll be visible when running tests.
-	// fmt.Println("Logs from your program will appear here!")
-
-	// Uncomment this block to pass the first stage!
-	//
+	flag.Parse()
+	exitIfError(err, "fatal: cannot get current working directory")
 	if len(os.Args) < 2 {
 		fmt.Fprintf(os.Stderr, "usage: mygit <command> [<args>...]\n")
 		os.Exit(1)
 	}
 
-	switch command := os.Args[1]; command {
+	switch command := flag.Arg(0); command {
 	case "init":
 		for _, dir := range []string{".git", ".git/objects", ".git/refs"} {
-			if err := os.MkdirAll(dir, 0755); err != nil {
-				fmt.Fprintf(os.Stderr, "Error creating directory: %s\n", err)
-			}
+			err := os.MkdirAll(filepath.Join(CWD, dir), 0755)
+			exitIfError(err, fmt.Sprintf("Error creating directory: %s\n", err))
 		}
 
 		headFileContents := []byte("ref: refs/heads/main\n")
-		if err := os.WriteFile(".git/HEAD", headFileContents, 0644); err != nil {
-			fmt.Fprintf(os.Stderr, "Error writing file: %s\n", err)
-		}
-
+		err := os.WriteFile(filepath.Join(CWD, ".git", "HEAD"), headFileContents, 0644)
+		exitIfError(err, fmt.Sprintf("Error writing file: %s\n", err))
 		fmt.Println("Initialized git directory")
 
 	case "cat-file":
-		sha := os.Args[3]
-		objectPath := ".git" + "/objects/" + sha[:2] + "/" + sha[2:]
+		if len(flag.Args()) < 3 {
+			fmt.Fprintf(os.Stderr, "fatal: mygit cat-file: insufficient arguments passed\n")
+			os.Exit(1)
+		}
+		allowedTypes := []string{"blob", "tree", "commit"}
+		objectType := flag.Arg(1)
+		sha := flag.Arg(2)
+		objectPath := filepath.Join(CWD, ".git", "objects", sha[:2], sha[2:])
 		buff, err := os.ReadFile(objectPath)
-		exitIfError(err, "FILE_READ_CAT")
-		data := decodeBlobObject(buff)
-		os.Stdout.Write(data)
+		exitIfError(err, fmt.Sprintf("Error reading file: %s\n", err))
+		data, _ := decompressContent(buff)
+		if objectType == "-p" {
+			// Pretty print
+			spaceIndex := bytes.Index(data, []byte(" "))
+			objectType = string(data[:spaceIndex])
+		} else {
+			fmt.Fprintf(os.Stderr, "fatal: mygit cat-file: only -p mode is supported as of now\n")
+			os.Exit(1)
+		}
+		if !slices.Contains(allowedTypes, objectType) {
+			fmt.Fprintf(os.Stderr, "fatal: unsupported object type detected\n")
+			os.Exit(1)
+		}
+		// if !bytes.HasPrefix(data, []byte(objectType+" ")) {
+		// 	fmt.Fprintf(os.Stderr, "fatal: mygit cat-file %s: bad file\n", sha)
+		// 	os.Exit(1)
+		// }
+		switch objectType {
+		case "blob":
+			data = decodeBlobObject(data, false)
+			os.Stdout.Write(data)
+		case "tree":
+			trees := decodeTreeObject(data, false)
+			for _, tree := range trees {
+				var oType string
+				switch tree.perm {
+				case DIR:
+					oType = "tree"
+				default:
+					oType = "blob"
+				}
+				os.Stdout.Write([]byte(fmt.Sprintf("%s %s %s\t%s\n", tree.perm, oType, hex.EncodeToString(tree.sha[:]), tree.name)))
+			}
+		default:
+			zeroIndex := bytes.Index(data, []byte{0x0})
+			os.Stdout.Write(data[zeroIndex+1:])
+		}
 
 	case "hash-object":
-		fileName := os.Args[3]
-		buff, err := os.ReadFile("./" + fileName)
-		exitIfError(err, "File Read")
-		hexHash := createBlobObject(buff)
+		if len(flag.Args()) < 2 {
+			fmt.Fprintf(os.Stderr, "fatal: mygit hash-object: insufficient arguments passed\n")
+			os.Exit(1)
+		}
+		fileName := flag.Arg(1)
+		if flag.Arg(1) == "-w" {
+			// Actually Write to Object store
+			fileName = flag.Arg(2)
+		}
+		if fileName == "" {
+			fmt.Fprintf(os.Stderr, "fatal: mygit hash-object: invalid filename passed\n")
+			os.Exit(1)
+		}
+		buff, err := os.ReadFile(filepath.Join(CWD, fileName))
+		exitIfError(err, fmt.Sprintf("Error reading file: %s", err))
+		blob := writeHeaderToContent(buff, Blob)
+		hexHash := hex.EncodeToString(hashContent(blob))
+		if flag.Arg(1) == "-w" {
+			createBlobObject(buff)
+		}
 		os.Stdout.Write([]byte(hexHash))
 
 	case "ls-tree":
-		treeSha := os.Args[3]
-		// Create Path to tree in .git using treeSHA and Read the file
+		supportedSubArgs := []string{"--name-only", "--object-only"}
+		if len(flag.Args()) < 2 {
+			fmt.Fprintf(os.Stderr, "fatal: mygit ls-tree: insufficient arguments passed\n")
+			os.Exit(1)
+		}
+		treeSha := flag.Arg(1)
+		if slices.Contains(supportedSubArgs, treeSha) {
+			// Only print name
+			treeSha = flag.Arg(2)
+			if slices.Contains(supportedSubArgs, treeSha) {
+				fmt.Fprintf(os.Stderr, "fatal: mygit ls-tree: no duplicate sub args or multiple sub args can't be combined!\n")
+				os.Exit(1)
+			}
+			if treeSha == "" {
+				fmt.Fprintf(os.Stderr, "fatal: mygit ls-tree: no object hash passed\n")
+				os.Exit(1)
+			}
+		}
 		treePath := ".git/objects/" + treeSha[:2] + "/" + treeSha[2:]
 		data, err := os.ReadFile(treePath)
-		exitIfError(err, "READ_FILE")
+		exitIfError(err, fmt.Sprintf("Error reading file: %s", err))
 		trees := decodeTreeObject(data, true)
-		for _, t := range trees {
-			fmt.Println(t.name)
+		if flag.Arg(1) == "--name-only" {
+			for _, t := range trees {
+				fmt.Println(t.name)
+			}
+		} else if flag.Arg(1) == "--object-only" {
+			for _, t := range trees {
+				fmt.Println(hex.EncodeToString(t.sha[:]))
+			}
+		} else {
+			for _, t := range trees {
+				var oType string
+				switch t.perm {
+				case DIR:
+					oType = "tree"
+				default:
+					oType = "blob"
+				}
+				os.Stdout.Write([]byte(fmt.Sprintf("%s %s %s\t%s\n", t.perm, oType, hex.EncodeToString(t.sha[:]), t.name)))
+			}
 		}
 
 	case "write-tree":
-		// data, err := os.ReadFile(path.Join(CWD, ".gitignore"))
-		// if err != nil {
-		// 	fmt.Println("read .gitignore failed! skipping ignorelist")
-		// }
-		// ignoreList := strings.Split(string(data), "\n")
-		// ignoreList = append(ignoreList, GIT_HOME)
 		hash := createTreeObject(".", &permMap)
 		hexHash := hex.EncodeToString(hash)
 		os.Stdout.Write([]byte(hexHash))
@@ -282,15 +358,24 @@ func main() {
 						latestTree := objects[latestCommit[5:45]].content
 						splits := strings.Split(symRef, "/")
 						branchName := splits[len(splits)-1]
-						os.MkdirAll(path.Join(CWD, dest, ".git", "objects"), 0644)
-						os.MkdirAll(path.Join(CWD, dest, ".git", "refs", "heads"), 0644)
-						os.WriteFile(path.Join(CWD, dest, ".git", "HEAD"), []byte("ref:"+symRef), 0755)
-						os.WriteFile(path.Join(CWD, dest, ".git", "refs", "heads", branchName), []byte(latestCommitHex), 0755)
+						os.MkdirAll(filepath.Join(CWD, dest, ".git", "objects"), 0644)
+						os.MkdirAll(filepath.Join(CWD, dest, ".git", "refs", "heads"), 0644)
+						os.WriteFile(filepath.Join(CWD, dest, ".git", "HEAD"), []byte("ref:"+symRef), 0755)
+						os.WriteFile(filepath.Join(CWD, dest, ".git", "refs", "heads", branchName), []byte(latestCommitHex), 0755)
+						data := fmt.Sprintf(`[remote "origin"]
+	url = %v
+	fetch = +refs/heads/*:refs/remotes/origin/*
+[branch "%v"]
+	remote = origin
+	merge = refs/heads/%v
+	vscode-merge-base = origin/%v
+`, gitUrl, branchName, branchName, branchName)
+						os.WriteFile(filepath.Join(CWD, dest, ".git", "config"), []byte(data), 0755)
 						treeContent := writeHeaderToContent(latestTree, Tree)
 						trees := decodeTreeObject(treeContent, false)
 						var writeTree func(string, []tree)
 						for hexHash, obj := range objects {
-							writeObjectToDisk(writeHeaderToContent(obj.content, obj.objectType), hexHash, true, path.Join(CWD, dest))
+							writeObjectToDisk(writeHeaderToContent(obj.content, obj.objectType), hexHash, true, filepath.Join(CWD, dest))
 						}
 						writeTree = func(destination string, trees []tree) {
 							for _, tree := range trees {
@@ -301,15 +386,15 @@ func main() {
 									if err != nil {
 										panic(err)
 									}
-									err = os.WriteFile(path.Join(".", rootPath, tree.name), objects[hexHash].content, 0755)
+									err = os.WriteFile(filepath.Join(".", rootPath, tree.name), objects[hexHash].content, 0755)
 									if err != nil {
 										panic(err)
 									}
-								} else if tree.perm == "40000" {
+								} else if tree.perm == "040000" {
 									treeObject := objects[hexHash].content
 									treeContent := writeHeaderToContent(treeObject, Tree)
 									latestTrees := decodeTreeObject(treeContent, false)
-									writeTree(path.Join(".", rootPath, tree.name), latestTrees)
+									writeTree(filepath.Join(".", rootPath, tree.name), latestTrees)
 								} else {
 									fmt.Println("Unhandled tree:", tree)
 								}

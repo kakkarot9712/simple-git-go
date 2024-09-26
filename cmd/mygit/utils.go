@@ -16,7 +16,7 @@ import (
 
 func exitIfError(err error, msg string) {
 	if err != nil {
-		fmt.Printf("Error: %v failed: %v", msg, err)
+		fmt.Fprintf(os.Stderr, msg+"\n")
 		os.Exit(1)
 	}
 }
