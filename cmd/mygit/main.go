@@ -3,30 +3,54 @@ package main
 import (
 	"bytes"
 	"encoding/hex"
-	"flag"
+	"errors"
 	"fmt"
 	"log"
 	"math"
 	"os"
 	"path/filepath"
-	"slices"
+	"runtime"
 	"strconv"
 	"strings"
+	"time"
+
+	"github.com/jessevdk/go-flags"
+	"gopkg.in/ini.v1"
 )
 
-// Usage: your_program.sh <command> <arg1> <arg2> ...
 func main() {
+	// GlobalconfigFileName := ".gitconfig"
+	// localConfigFileName := "config"
+	globalConfigPath := ""
+	currentOs := runtime.GOOS
+	if currentOs == "windows" {
+		globalConfigPath = filepath.Join(os.Getenv("USERPROFILE"), ".mygitconfig")
+	} else if currentOs == "linux" {
+		globalConfigPath = filepath.Join(os.Getenv("HOME"), ".mygitconfig")
+	} else {
+		fmt.Fprintf(os.Stderr, "fatal: unsupported platform\n")
+		os.Exit(1)
+	}
+	config, err := ini.Load(globalConfigPath)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			config = ini.Empty()
+			config.SaveTo(globalConfigPath)
+		} else {
+			fmt.Println(err)
+			panic("fatal: mygit: failed to open config file")
+		}
+	}
 	permMap := map[string]uint32{"file": 100644, "exe": 100755, "symlink": 120000, "dir": 40000}
 	BYTE_VAL := 128
 	CWD, err := os.Getwd()
-	flag.Parse()
 	exitIfError(err, "fatal: cannot get current working directory")
 	if len(os.Args) < 2 {
 		fmt.Fprintf(os.Stderr, "usage: mygit <command> [<args>...]\n")
 		os.Exit(1)
 	}
 
-	switch command := flag.Arg(0); command {
+	switch command := os.Args[1]; command {
 	case "init":
 		for _, dir := range []string{".git", ".git/objects", ".git/refs"} {
 			err := os.MkdirAll(filepath.Join(CWD, dir), 0755)
@@ -38,34 +62,79 @@ func main() {
 		exitIfError(err, fmt.Sprintf("Error writing file: %s\n", err))
 		fmt.Println("Initialized git directory")
 
-	case "cat-file":
-		if len(flag.Args()) < 3 {
-			fmt.Fprintf(os.Stderr, "fatal: mygit cat-file: insufficient arguments passed\n")
+	case "config":
+		type Option struct {
+			Global bool `short:"g" long:"global" description:"Do operations on global config file"`
+			Add    bool `short:"a" long:"add" description:"add new value to config file"`
+			Get    bool `short:"b" long:"get" description:"get value from config file"`
+		}
+		opts := Option{}
+		nFlagArgs, err := flags.Parse(&opts)
+		if err != nil {
+			panic(err)
+		}
+		if (opts.Add && opts.Get) || (!opts.Add && !opts.Get) {
+			// flag.Usage()
+			fmt.Fprintf(os.Stderr, "fatal: mygit config: invalid flags passed\n")
 			os.Exit(1)
 		}
-		allowedTypes := []string{"blob", "tree", "commit"}
-		objectType := flag.Arg(1)
-		sha := flag.Arg(2)
+		if !opts.Global {
+			fmt.Fprintf(os.Stderr, "fatal: mygit config: only command with global flag supported as of now\n")
+			os.Exit(1)
+		}
+		configName := nFlagArgs[1]
+		sectionName := ""
+		keyName := ""
+		nameWithSection := strings.Split(configName, ".")
+		if len(nameWithSection) < 2 {
+			keyName = nameWithSection[0]
+		} else {
+			sectionName = nameWithSection[0]
+			keyName = nameWithSection[1]
+		}
+		if opts.Add {
+			if len(nFlagArgs) < 3 {
+				fmt.Fprintf(os.Stderr, "fatal: mygit config --global --add: value for key is invalid\n")
+				os.Exit(1)
+			}
+			value := nFlagArgs[2]
+			config.Section(sectionName).Key(keyName).SetValue(value)
+			config.SaveTo(globalConfigPath)
+		} else {
+			value := config.Section(sectionName).Key(keyName).String()
+			os.Stdout.Write([]byte(value))
+		}
+
+	case "cat-file":
+		type Options struct {
+			PrettyPrint bool `short:"p" description:"Pretty print content of objects"`
+		}
+		opts := Options{}
+		args, err := flags.Parse(&opts)
+		if err != nil {
+			fmt.Println(err)
+			panic(err)
+		}
+		if !opts.PrettyPrint {
+			fmt.Fprintf(os.Stderr, "fatal: mygit cat-file: only -p mode is supported as of now\n")
+			os.Exit(1)
+		}
+		if len(args) != 2 {
+			fmt.Println(args)
+			// flag.Usage()
+			os.Exit(1)
+		}
+		// allowedTypes := []string{"blob", "tree", "commit"}
+		// objectType := flag.Arg(1)
+		sha := args[1]
 		objectPath := filepath.Join(CWD, ".git", "objects", sha[:2], sha[2:])
 		buff, err := os.ReadFile(objectPath)
 		exitIfError(err, fmt.Sprintf("Error reading file: %s\n", err))
 		data, _ := decompressContent(buff)
-		if objectType == "-p" {
-			// Pretty print
-			spaceIndex := bytes.Index(data, []byte(" "))
-			objectType = string(data[:spaceIndex])
-		} else {
-			fmt.Fprintf(os.Stderr, "fatal: mygit cat-file: only -p mode is supported as of now\n")
-			os.Exit(1)
-		}
-		if !slices.Contains(allowedTypes, objectType) {
-			fmt.Fprintf(os.Stderr, "fatal: unsupported object type detected\n")
-			os.Exit(1)
-		}
-		// if !bytes.HasPrefix(data, []byte(objectType+" ")) {
-		// 	fmt.Fprintf(os.Stderr, "fatal: mygit cat-file %s: bad file\n", sha)
-		// 	os.Exit(1)
-		// }
+		// Pretty print
+		spaceIndex := bytes.Index(data, []byte(" "))
+		objectType := string(data[:spaceIndex])
+
 		switch objectType {
 		case "blob":
 			data = decodeBlobObject(data, false)
@@ -88,56 +157,56 @@ func main() {
 		}
 
 	case "hash-object":
-		if len(flag.Args()) < 2 {
-			fmt.Fprintf(os.Stderr, "fatal: mygit hash-object: insufficient arguments passed\n")
-			os.Exit(1)
+		type Options struct {
+			WriteToStore bool `short:"w" long:"write" description:"Write object to store"`
 		}
-		fileName := flag.Arg(1)
-		if flag.Arg(1) == "-w" {
-			// Actually Write to Object store
-			fileName = flag.Arg(2)
+		opts := Options{}
+		args, err := flags.Parse(&opts)
+		if err != nil {
+			panic(err)
 		}
-		if fileName == "" {
+		if len(args) < 2 {
 			fmt.Fprintf(os.Stderr, "fatal: mygit hash-object: invalid filename passed\n")
 			os.Exit(1)
 		}
+		fileName := args[1]
 		buff, err := os.ReadFile(filepath.Join(CWD, fileName))
 		exitIfError(err, fmt.Sprintf("Error reading file: %s", err))
 		blob := writeHeaderToContent(buff, Blob)
 		hexHash := hex.EncodeToString(hashContent(blob))
-		if flag.Arg(1) == "-w" {
+		if opts.WriteToStore {
 			createBlobObject(buff)
 		}
 		os.Stdout.Write([]byte(hexHash))
 
 	case "ls-tree":
-		supportedSubArgs := []string{"--name-only", "--object-only"}
-		if len(flag.Args()) < 2 {
+		type Options struct {
+			NameOnly   bool `short:"n" long:"name-only" description:"Only print name of the objects"`
+			ObjectOnly bool `short:"o" long:"object-only" description:"Only print hash of the objects"`
+		}
+		opts := Options{}
+		args, err := flags.Parse(&opts)
+		if err != nil {
+			panic(err)
+		}
+		if opts.NameOnly && opts.ObjectOnly {
+			fmt.Fprintf(os.Stderr, "fatal: mygit ls-tree: --name-only and --object-only can't be combined!\n")
+			os.Exit(1)
+		}
+		if len(args) < 2 {
 			fmt.Fprintf(os.Stderr, "fatal: mygit ls-tree: insufficient arguments passed\n")
 			os.Exit(1)
 		}
-		treeSha := flag.Arg(1)
-		if slices.Contains(supportedSubArgs, treeSha) {
-			// Only print name
-			treeSha = flag.Arg(2)
-			if slices.Contains(supportedSubArgs, treeSha) {
-				fmt.Fprintf(os.Stderr, "fatal: mygit ls-tree: no duplicate sub args or multiple sub args can't be combined!\n")
-				os.Exit(1)
-			}
-			if treeSha == "" {
-				fmt.Fprintf(os.Stderr, "fatal: mygit ls-tree: no object hash passed\n")
-				os.Exit(1)
-			}
-		}
+		treeSha := args[1]
 		treePath := ".git/objects/" + treeSha[:2] + "/" + treeSha[2:]
 		data, err := os.ReadFile(treePath)
 		exitIfError(err, fmt.Sprintf("Error reading file: %s", err))
 		trees := decodeTreeObject(data, true)
-		if flag.Arg(1) == "--name-only" {
+		if opts.NameOnly {
 			for _, t := range trees {
 				fmt.Println(t.name)
 			}
-		} else if flag.Arg(1) == "--object-only" {
+		} else if opts.ObjectOnly {
 			for _, t := range trees {
 				fmt.Println(hex.EncodeToString(t.sha[:]))
 			}
@@ -160,20 +229,36 @@ func main() {
 		os.Stdout.Write([]byte(hexHash))
 
 	case "commit-tree":
-		hash := os.Args[2]
-		parent := os.Args[4]
-		message := os.Args[6]
-		author_time := 1724929752
+		type Option struct {
+			Parent  string `short:"p" long:"parent" description:"hash of parent commit tree"`
+			Message string `short:"m" long:"message" description:"message of commit"`
+		}
+		opts := Option{}
+		args, err := flags.Parse(&opts)
+		if err != nil {
+			panic(err)
+		}
+		hash := args[1]
+		author_time := time.Now().Unix()
 		tz := "+0530"
-		authorName := "Vikalp Gandha"
-		email := "vikalp.gandha@test.com"
+		authorName := config.Section("user").Key("name").String()
+		email := config.Section("user").Key("email").String()
+
+		if authorName == "" || email == "" {
+			fmt.Println(`
+You haven't set any value for name and email for commit. To execute commit-tree command, set name and email to global config file first. To do so you can execute below command
+
+	mygit config --global --add user.name "Your Name"
+	mygit config --global --add user.email "Your email address"`)
+			os.Exit(1)
+		}
 
 		commitContent := "tree " + hash + "\n" +
-			"parent " + parent + "\n" +
-			"author " + authorName + " " + "<" + email + ">" + " " + strconv.Itoa(author_time) + " " + tz + "\n" +
-			"committer " + authorName + " " + "<" + email + ">" + " " + strconv.Itoa(author_time) + " " + tz + "\n" +
+			"parent " + opts.Parent + "\n" +
+			"author " + authorName + " " + "<" + email + ">" + " " + strconv.Itoa(int(author_time)) + " " + tz + "\n" +
+			"committer " + authorName + " " + "<" + email + ">" + " " + strconv.Itoa(int(author_time)) + " " + tz + "\n" +
 			"\n" +
-			message + "\n"
+			opts.Message + "\n"
 		commitHex := createCommitObject([]byte(commitContent))
 		os.Stdout.Write([]byte(commitHex))
 
@@ -181,6 +266,10 @@ func main() {
 		gitUrl := os.Args[2]
 		dest := os.Args[3]
 		// Peform Ref Discovery
+		if !strings.HasPrefix(gitUrl, "https://") {
+			fmt.Fprintf(os.Stderr, "fatal: mygit clone: only https urls are supported as of now.\n")
+			os.Exit(1)
+		}
 		fmt.Println("Cloning repository in", dest)
 		refs := discoverRefs(gitUrl)
 
@@ -358,19 +447,23 @@ func main() {
 						latestTree := objects[latestCommit[5:45]].content
 						splits := strings.Split(symRef, "/")
 						branchName := splits[len(splits)-1]
+						localConfigPath := filepath.Join(CWD, dest, ".git", "config")
+						localConfig := ini.Empty()
+						section := localConfig.Section(`remote "origin`)
+						section.Key("url").SetValue(gitUrl)
+						section.Key("fetch").SetValue("+refs/heads/*:refs/remotes/origin/*")
+						section = localConfig.Section(fmt.Sprintf(`branch "%v"`, branchName))
+						section.Key("remote").SetValue("origin")
+						section.Key("merge").SetValue("refs/heads/" + branchName)
 						os.MkdirAll(filepath.Join(CWD, dest, ".git", "objects"), 0644)
 						os.MkdirAll(filepath.Join(CWD, dest, ".git", "refs", "heads"), 0644)
 						os.WriteFile(filepath.Join(CWD, dest, ".git", "HEAD"), []byte("ref:"+symRef), 0755)
 						os.WriteFile(filepath.Join(CWD, dest, ".git", "refs", "heads", branchName), []byte(latestCommitHex), 0755)
-						data := fmt.Sprintf(`[remote "origin"]
-	url = %v
-	fetch = +refs/heads/*:refs/remotes/origin/*
-[branch "%v"]
-	remote = origin
-	merge = refs/heads/%v
-	vscode-merge-base = origin/%v
-`, gitUrl, branchName, branchName, branchName)
-						os.WriteFile(filepath.Join(CWD, dest, ".git", "config"), []byte(data), 0755)
+						err := localConfig.SaveTo(localConfigPath)
+						if err != nil {
+							panic(err)
+						}
+						// os.WriteFile(filepath.Join(CWD, dest, ".git", "config"), []byte(data), 0755)
 						treeContent := writeHeaderToContent(latestTree, Tree)
 						trees := decodeTreeObject(treeContent, false)
 						var writeTree func(string, []tree)
