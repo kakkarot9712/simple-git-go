@@ -1,60 +1,95 @@
-[![progress-banner](https://backend.codecrafters.io/progress/git/57f6d399-8ba6-4f39-9bee-fc8080484836)](https://app.codecrafters.io/users/codecrafters-bot?r=2qF)
+# Simple Git
 
-This is a starting point for Go solutions to the
-["Build Your Own Git" Challenge](https://codecrafters.io/challenges/git).
+A lightweight implementation of Git, supporting basic Git operations. This project is written in Go and provides a command-line interface for interacting with Git-like repositories.
 
-In this challenge, you'll build a small Git implementation that's capable of
-initializing a repository, creating commits and cloning a public repository.
-Along the way we'll learn about the `.git` directory, Git objects (blobs,
-commits, trees etc.), Git's transfer protocols and more.
-
-**Note**: If you're viewing this repo on GitHub, head over to
+**Note**: This project is part of `Build Your Own X` challenge of CodeCrafters platform. Head over to
 [codecrafters.io](https://codecrafters.io) to try the challenge.
 
-# Passing the first stage
+## Supported Commands
 
-The entry point for your Git implementation is in `cmd/mygit/main.go`. Study and
-uncomment the relevant code, and push your changes to pass the first stage:
+- `ls-tree`: List the contents of a tree object
+- `cat-file`: Display the contents of a Git object
+- `commit-tree`: Create a new commit object from Tree Hash (Partially Supported)
+- `write-tree`: Create a tree object from the current index.
+- `clone`: Clone a repository (supports HTTP URLs only, limitations apply)
+- `hash-object`: Compute object ID and optionally create a blob from a file.
+- `init`: Create an empty Git repository or reinitialize an existing one.
+- `config`: Create and/or update global config file. (Partially Supported)
 
-```sh
-git add .
-git commit -m "pass 1st stage" # any msg
-git push origin master
-```
+## Prerequisites
 
-That's all!
+This project requires Go to be installed on your system. If you don't have Go installed, you can download it from the official Go downloads page:
 
-# Stage 2 & beyond
+[https://go.dev/dl/](https://go.dev/dl/)
 
-Note: This section is for stages 2 and beyond.
+Choose the appropriate version for your operating system and follow the installation instructions provided on the Go website.
 
-1. Ensure you have `go` installed locally
-1. Run `./your_program.sh` to run your Git implementation, which is implemented
-   in `cmd/mygit/main.go`.
-1. Commit your changes and run `git push origin master` to submit your solution
-   to CodeCrafters. Test output will be streamed to your terminal.
+## Installation
 
-# Testing locally
+After ensuring Go is installed on your system, follow these steps to set up Simple Git:
 
-The `your_program.sh` script is expected to operate on the `.git` folder inside
-the current working directory. If you're running this inside the root of this
-repository, you might end up accidentally damaging your repository's `.git`
-folder.
+1. Clone the repository:
+   ```
+   git clone https://github.com/kakkarot9712/simple-git-go.git
+   ```
 
-We suggest executing `your_program.sh` in a different folder when testing
-locally. For example:
+2. Navigate to the project directory:
+   ```
+   cd simple-git-go
+   ```
 
-```sh
-mkdir -p /tmp/testing && cd /tmp/testing
-/path/to/your/repo/your_program.sh init
-```
+3. Build the project:
+   ```
+   go build ./cmd/mygit
+   ```
 
-To make this easier to type out, you could add a
-[shell alias](https://shapeshed.com/unix-alias/):
+This will create an executable named `mygit` in your project directory.
 
-```sh
-alias mygit=/path/to/your/repo/your_program.sh
+## Usage
 
-mkdir -p /tmp/testing && cd /tmp/testing
-mygit init
-```
+After building the project, you can use the `mygit` executable to run Git commands. Here are some examples:
+
+1. Initialize a new repository:
+   ```
+   ./mygit init
+   ```
+
+2. Create a blob object:
+   ```
+   ./mygit hash-object (-w) <file>
+   ```
+
+3. Display the contents of a Git object:
+   ```
+   ./mygit cat-file (-p) <object-hash>
+   ```
+
+4. Clone a repository:
+   ```
+   ./mygit clone <repository-url>
+   ```
+
+5. List the contents of a tree object:
+   ```
+   ./mygit ls-tree [--object-only | --name-only] <tree-hash>
+   ```
+
+6. Create a new commit:
+   ```
+   ./mygit commit-tree <tree-hash> -p <parent-commit-hash> -m "Commit message"
+   ```
+
+7. Manage global config file:
+   ```
+   ./mygit config [--global] [--add | --get] <key> <value>
+   ```
+
+## Limitations
+
+- The `clone` command only supports HTTP URLs and v2 PackFiles.
+- Cloning repositories with PackFiles containing Ref Delta objects are not supported. (Basically repositories with larger sizes are not supported).
+- There is no `staging area` implimented in this CLI as of now.
+- Currently `commit-tree` commands takes IST Timezone in commits (+0530) regardless of actual location.
+- `commit-tree` only supports one line messages as of now.
+- `config` command will only work with global config files named `.mygitconfig` to prevent unwanted changes to actual `.gitconfig` file. This config file will be fetched or created at `$USERPROFILE` directory if used in windows and in `$HOME` directory if used in Linux.
+- Though you can set any value with section using `mygit config` command, This CLI will only use `user.name` and `user.email` from this config file as of now.
