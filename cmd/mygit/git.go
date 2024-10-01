@@ -85,7 +85,7 @@ func createCommitObject(data []byte) string {
 	return commitHex
 }
 
-func createTreeObject(dirpath string, permMap *map[string]uint32) (hash []byte) {
+func createTreeObject(dirpath string) (hash []byte) {
 	files, err := os.ReadDir(dirpath)
 	exitIfError(err, "READ_DIR")
 	// fmt.Println(files)
@@ -95,8 +95,8 @@ func createTreeObject(dirpath string, permMap *map[string]uint32) (hash []byte) 
 		if file.Name() != ".git" {
 			if file.IsDir() {
 				// fmt.Println(path.Join(dirpath, file.Name()) + "_DIR")
-				hash := createTreeObject(path.Join(dirpath, file.Name()), permMap)
-				content += strconv.Itoa(int((*permMap)["dir"])) + " " + file.Name() + string(zeroByte) + string(hash)
+				hash := createTreeObject(path.Join(dirpath, file.Name()))
+				content += string(DIR) + " " + file.Name() + string(zeroByte) + string(hash)
 				// Calc Hash Rec
 			} else {
 				// fmt.Println(file.Name() + "_FILE")
@@ -105,7 +105,7 @@ func createTreeObject(dirpath string, permMap *map[string]uint32) (hash []byte) 
 				hexhash := createBlobObject(buff)
 				hash, err := hex.DecodeString(hexhash)
 				exitIfError(err, "HEXTOHASH CONV")
-				content += strconv.Itoa(int((*permMap)["file"])) + " " + file.Name() + string(zeroByte) + string(hash)
+				content += string(FILE) + " " + file.Name() + string(zeroByte) + string(hash)
 				// fmt.Println(content, "C")
 			}
 		}
@@ -238,9 +238,9 @@ func decodeTreeObject(rawTree []byte, compressed bool) []tree {
 		ftree.perm = ObjectPerm(out[cursor : cursor+spIndex])
 		ftree.name = string(out[cursor+spIndex+1 : cursor+zeroIndex])
 		ftree.sha = [20]byte(out[cursor+zeroIndex+1 : cursor+zeroIndex+1+20])
-		for range 6 - len(ftree.perm) {
-			ftree.perm = "0" + ftree.perm
-		}
+		// for range 6 - len(ftree.perm) {
+		// 	ftree.perm = "0" + ftree.perm
+		// }
 		cursor += zeroIndex + 20 + 1
 		trees = append(trees, ftree)
 		if cursor == len(out) {

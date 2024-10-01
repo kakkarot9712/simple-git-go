@@ -41,7 +41,6 @@ func main() {
 			panic("fatal: mygit: failed to open config file")
 		}
 	}
-	permMap := map[string]uint32{"file": 100644, "exe": 100755, "symlink": 120000, "dir": 40000}
 	BYTE_VAL := 128
 	CWD, err := os.Getwd()
 	exitIfError(err, "fatal: cannot get current working directory")
@@ -224,7 +223,7 @@ func main() {
 		}
 
 	case "write-tree":
-		hash := createTreeObject(".", &permMap)
+		hash := createTreeObject(".")
 		hexHash := hex.EncodeToString(hash)
 		os.Stdout.Write([]byte(hexHash))
 
