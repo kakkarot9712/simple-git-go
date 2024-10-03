@@ -21,7 +21,7 @@ const (
 	FILE    ObjectPerm = "100644"
 	EXE     ObjectPerm = "100755"
 	SYMLINK ObjectPerm = "120000"
-	DIR     ObjectPerm = "040000"
+	DIR     ObjectPerm = "40000"
 )
 
 type tree struct {
@@ -238,9 +238,9 @@ func decodeTreeObject(rawTree []byte, compressed bool) []tree {
 		ftree.perm = ObjectPerm(out[cursor : cursor+spIndex])
 		ftree.name = string(out[cursor+spIndex+1 : cursor+zeroIndex])
 		ftree.sha = [20]byte(out[cursor+zeroIndex+1 : cursor+zeroIndex+1+20])
-		// for range 6 - len(ftree.perm) {
-		// 	ftree.perm = "0" + ftree.perm
-		// }
+		for range 6 - len(ftree.perm) {
+			ftree.perm = "0" + ftree.perm
+		}
 		cursor += zeroIndex + 20 + 1
 		trees = append(trees, ftree)
 		if cursor == len(out) {
